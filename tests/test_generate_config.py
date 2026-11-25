@@ -1,4 +1,5 @@
 import errno
+from functools import partial
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -255,6 +256,7 @@ class GenerateConfigTests(unittest.TestCase):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
         east, west = document["endpoints"]
         east["model_defaults"] = {
+            "z_custom_field": True,
             "litellm_params": {
                 "use_chat_completions_api": True,
                 "custom_parameter": {"options": [False, "custom"]},
@@ -277,7 +279,10 @@ class GenerateConfigTests(unittest.TestCase):
             ("west-only", "west-only", west, self.west_base),
             ("west/shared", "shared", west, self.west_base),
         ]
-        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+        for extension, dump in (
+            (".json", json.dumps),
+            (".yaml", partial(yaml.safe_dump, sort_keys=False)),
+        ):
             self.input_path = self.input_path.with_suffix(extension)
             for defaults_setting in (west_defaults, None, {}):
                 with self.subTest(extension=extension, west_defaults=defaults_setting):
@@ -293,6 +298,12 @@ class GenerateConfigTests(unittest.TestCase):
                     self.assertEqual(len(entries), len(expected_entries))
                     for entry, (name, model_id, endpoint, api_base) in zip(entries, expected_entries):
                         defaults = endpoint.get("model_defaults", {})
+                        expected_keys = ["model_name", "litellm_params"]
+                        if endpoint is east:
+                            expected_keys.extend(["model_info", "z_custom_field", "custom_field"])
+                        elif defaults:
+                            expected_keys.extend(["model_info", "custom_field"])
+                        self.assertEqual(list(entry), expected_keys, name)
                         self.assertEqual(entry, {
                             **defaults,
                             "model_name": name,
@@ -323,7 +334,9 @@ class GenerateConfigTests(unittest.TestCase):
         effort_levels = ["none", "low", "medium", "high"]
         riken["model_overrides"] = {
             model_id: {
+                "z_custom_field": True,
                 "litellm_params": {"use_chat_completions_api": True},
+                "custom_field": {"allocation": [1]},
                 "model_info": {
                     "supports_reasoning": True,
                     "reasoning_effort_levels": effort_levels,
@@ -332,7 +345,10 @@ class GenerateConfigTests(unittest.TestCase):
             model_id.lower(): {"unexpected": "different case"},
             f"riken/{model_id}": {"unexpected": "public name"},
         }
-        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+        for extension, dump in (
+            (".json", json.dumps),
+            (".yaml", partial(yaml.safe_dump, sort_keys=False)),
+        ):
             with self.subTest(extension=extension):
                 self.input_path = self.input_path.with_suffix(extension)
                 self.input_path.write_text(dump(document), encoding="utf-8")
@@ -341,6 +357,11 @@ class GenerateConfigTests(unittest.TestCase):
                 config = yaml.safe_load((self.directory / "config.yaml").read_text())
                 entries = {entry["model_name"]: entry for entry in config["model_list"]}
                 target = entries.pop(f"riken/{model_id}")
+                self.assertEqual(list(target), [
+                    "model_name", "litellm_params", "model_info", "z_custom_field", "custom_field",
+                ])
+                self.assertIs(target["z_custom_field"], True)
+                self.assertEqual(target["custom_field"], {"allocation": [1]})
                 self.assertIs(target["litellm_params"]["use_chat_completions_api"], True)
                 self.assertIs(target["model_info"]["supports_reasoning"], True)
                 self.assertEqual(target["model_info"]["reasoning_effort_levels"], effort_levels)
@@ -353,8 +374,8 @@ class GenerateConfigTests(unittest.TestCase):
                 self.assertNotIn("unexpected", target)
                 self.assertEqual(set(entries), {"east-only", "west-only", f"west/{model_id}"})
                 for entry in entries.values():
+                    self.assertEqual(list(entry), ["model_name", "litellm_params"])
                     self.assertNotIn("use_chat_completions_api", entry["litellm_params"])
-                    self.assertNotIn("model_info", entry)
                     self.assertNotIn("unexpected", entry)
 
     def test_generated_settings_overwrite_model_defaults(self):

@@ -221,8 +221,14 @@ def build_config(endpoints):
                 generated["model_info"] = {"reasoning_template": template}
             entry = merge_settings(endpoint.model_defaults, generated)
             entry = merge_settings(entry, endpoint.model_overrides.get(model_id, {}))
-            entries.append(entry)
-            model_info = entry.get("model_info")
+            ordered_entry = {
+                key: entry.pop(key)
+                for key in ("model_name", "litellm_params", "model_info")
+                if key in entry
+            }
+            ordered_entry.update(entry)
+            entries.append(ordered_entry)
+            model_info = ordered_entry.get("model_info")
             if (
                 isinstance(model_info, dict)
                 and model_info.get("reasoning_template") in ACTIVE_REASONING_TEMPLATES
