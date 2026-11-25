@@ -316,21 +316,156 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output_path.read_bytes(), expected)
 
-    def test_model_defaults_conflicts_report_only_the_key_path(self):
+    def test_model_overrides_match_exact_ids_per_endpoint_in_both_formats(self):
+        model_id = "deepseek-ai/DeepSeek-V4-Flash"
+        self.server.replies[EAST_PATH] = (200, model_list(model_id, "east-only"))
+        self.server.replies[WEST_PATH] = (200, model_list(model_id, "west-only"))
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        for defaults, key_path in (
-            ({"litellm_params": {"model": "openai/shared"}}, "litellm_params.model"),
-            ({"litellm_params": {"api_key": "private-default"}}, "litellm_params.api_key"),
-            ({"litellm_params": "private-default"}, "litellm_params"),
-            ({"model_name": {"nested": "private-default"}}, "model_name"),
+        riken, _ = document["endpoints"]
+        riken["name"] = "riken"
+        effort_levels = ["none", "low", "medium", "high"]
+        riken["model_overrides"] = {
+            model_id: {
+                "litellm_params": {"use_chat_completions_api": True},
+                "model_info": {
+                    "supports_reasoning": True,
+                    "reasoning_effort_levels": effort_levels,
+                },
+            },
+            model_id.lower(): {"unexpected": "different case"},
+            f"riken/{model_id}": {"unexpected": "public name"},
+        }
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            with self.subTest(extension=extension):
+                self.input_path = self.input_path.with_suffix(extension)
+                self.input_path.write_text(dump(document), encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = yaml.safe_load((self.directory / "config.yaml").read_text())
+                entries = {entry["model_name"]: entry for entry in config["model_list"]}
+                target = entries.pop(f"riken/{model_id}")
+                self.assertIs(target["litellm_params"]["use_chat_completions_api"], True)
+                self.assertIs(target["model_info"]["supports_reasoning"], True)
+                self.assertEqual(target["model_info"]["reasoning_effort_levels"], effort_levels)
+                self.assertEqual(target["litellm_params"], {
+                    "model": f"openai/{model_id}",
+                    "api_base": self.east_base,
+                    "api_key": EAST_KEY,
+                    "use_chat_completions_api": True,
+                })
+                self.assertNotIn("unexpected", target)
+                self.assertEqual(set(entries), {"east-only", "west-only", f"west/{model_id}"})
+                for entry in entries.values():
+                    self.assertNotIn("use_chat_completions_api", entry["litellm_params"])
+                    self.assertNotIn("model_info", entry)
+                    self.assertNotIn("unexpected", entry)
+
+    def test_generated_settings_overwrite_model_defaults(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["endpoints"][0]["reasoning_templates"] = {"shared": "enable_thinking"}
+        for params, extra in (
+            ({"model": "default-model", "api_base": "default-base", "api_key": "default-key",
+              "custom": "preserved"}, {"custom": "preserved"}),
+            (["default-params"], {}),
         ):
-            with self.subTest(key_path=key_path):
-                document["model_defaults"] = defaults
+            with self.subTest(params=params):
+                document["model_defaults"] = {
+                    "model_name": {"nested": "default-name"},
+                    "litellm_params": params,
+                    "model_info": {"reasoning_template": "passthrough", "supports_reasoning": True},
+                }
                 self.input_path.write_text(json.dumps(document), encoding="utf-8")
-                message = f"Conflicting model setting: {key_path}"
-                result = self.assert_preserved_on_failure(message)
-                self.assertEqual(result.stderr, f"Error: {message}\n")
-                self.assertEqual(result.stdout, "")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = yaml.safe_load((self.directory / "config.yaml").read_text())
+                self.assertEqual(config["model_list"][0], {
+                    "model_name": "east/shared",
+                    "litellm_params": {
+                        "model": "openai/shared", "api_base": self.east_base, "api_key": EAST_KEY,
+                        **extra,
+                    },
+                    "model_info": {"reasoning_template": "enable_thinking", "supports_reasoning": True},
+                })
+
+    def test_model_overrides_overwrite_generated_and_nested_default_values(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["model_defaults"] = {
+            "custom": {
+                "nested": {
+                    "preserved": True, "levels": ["default", "removed"],
+                    "object": {"key": "removed"}, "scalar": "replaced",
+                },
+            },
+        }
+        east, _ = document["endpoints"]
+        east["reasoning_templates"] = {"shared": "enable_thinking"}
+        east["model_overrides"] = {
+            "shared": {
+                "model_name": "override-name",
+                "litellm_params": {"model": "override-model", "api_key": "override-key"},
+                "model_info": {"reasoning_template": "passthrough"},
+                "custom": {"nested": {"levels": ["overridden"], "object": None, "scalar": {"key": 2}}},
+            },
+        }
+        self.input_path.write_text(json.dumps(document), encoding="utf-8")
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = yaml.safe_load((self.directory / "config.yaml").read_text())
+        self.assertEqual(config["model_list"][0], {
+            "model_name": "override-name",
+            "litellm_params": {
+                "model": "override-model", "api_base": self.east_base, "api_key": "override-key",
+            },
+            "model_info": {"reasoning_template": "passthrough"},
+            "custom": {
+                "nested": {
+                    "preserved": True, "levels": ["overridden"], "object": None, "scalar": {"key": 2},
+                },
+            },
+        })
+        self.assertEqual(config["model_list"][1]["custom"], document["model_defaults"]["custom"])
+        self.assertNotIn("litellm_settings", config)
+
+    def test_empty_and_undiscovered_model_overrides_match_omitted_overrides(self):
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_path = self.directory / "config.yaml"
+        expected = output_path.read_bytes()
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for overrides in ({}, {"shared": {}}, {"west-only": {"custom": True}}):
+            with self.subTest(overrides=overrides):
+                document["endpoints"][0]["model_overrides"] = overrides
+                self.input_path.write_text(json.dumps(document), encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output_path.read_bytes(), expected)
+
+    def test_invalid_model_overrides_preserve_output_before_discovery(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        self.input_path.unlink()
+        invalid_cases = [
+            (None, "must be a mapping"),
+            (["private-setting"], "must be a mapping"),
+            ("private-setting", "must be a mapping"),
+            ({"private-id": "private-setting"}, "values must be mappings"),
+            ({"private-id": ["private-setting"]}, "values must be mappings"),
+            ({"private-id": None}, "values must be mappings"),
+            ({42: {"custom": "private-setting"}}, "must have string model IDs"),
+        ]
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path = self.input_path.with_suffix(extension)
+            for overrides, error in invalid_cases:
+                if extension == ".json" and isinstance(overrides, dict) and 42 in overrides:
+                    continue  # JSON object keys are always strings.
+                with self.subTest(extension=extension, overrides=overrides):
+                    document["endpoints"][1]["model_overrides"] = overrides
+                    self.input_path.write_text(dump(document), encoding="utf-8")
+                    message = f"Endpoint 2 model_overrides {error}."
+                    result = self.assert_preserved_on_failure(message)
+                    self.assertEqual(result.stderr, f"Error: {message}\n")
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.server.requests, [])
+            self.input_path.unlink()
 
     def test_model_defaults_must_be_a_mapping(self):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))

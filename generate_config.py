@@ -18,7 +18,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import yaml
 
 
-REASONING_TEMPLATES = {"enable_thinking", "thinking_mode", "passthrough"}
+ACTIVE_REASONING_TEMPLATES = ("enable_thinking", "thinking_mode")
+REASONING_TEMPLATES = (*ACTIVE_REASONING_TEMPLATES, "passthrough")
 REASONING_CALLBACK = "reasoning_transform.handler"
 
 
@@ -32,6 +33,7 @@ class Endpoint:
     api_base: str
     api_key: str
     reasoning_templates: dict[str, str] = field(default_factory=dict)
+    model_overrides: dict[str, dict] = field(default_factory=dict)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -116,7 +118,19 @@ def read_input(path):
                     f"Endpoint {position} reasoning_templates values must be "
                     "enable_thinking, thinking_mode, or passthrough."
                 )
-        endpoints.append(Endpoint(name, api_base, api_key, reasoning_templates))
+        model_overrides = item.get("model_overrides", {})
+        if not isinstance(model_overrides, dict):
+            raise GenerationError(f"Endpoint {position} model_overrides must be a mapping.")
+        for model_id, settings in model_overrides.items():
+            if not isinstance(model_id, str):
+                raise GenerationError(
+                    f"Endpoint {position} model_overrides must have string model IDs."
+                )
+            if not isinstance(settings, dict):
+                raise GenerationError(
+                    f"Endpoint {position} model_overrides values must be mappings."
+                )
+        endpoints.append(Endpoint(name, api_base, api_key, reasoning_templates, model_overrides))
         names.add(name)
     return endpoints, model_defaults
 
@@ -161,16 +175,13 @@ def fetch_model_ids(opener, endpoint, position):
     return list(dict.fromkeys(item["id"] for item in data))
 
 
-def merge_model_defaults(generated, defaults, path=()):
-    merged = generated.copy()
-    for key, value in defaults.items():
-        if key not in generated:
-            merged[key] = value
-            continue
-        key_path = (*path, key)
-        if not isinstance(generated[key], dict) or not isinstance(value, dict):
-            raise GenerationError("Conflicting model setting: " + ".".join(key_path))
-        merged[key] = merge_model_defaults(generated[key], value, key_path)
+def merge_settings(base, overlay):
+    merged = base.copy()
+    for key, value in overlay.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            value = merge_settings(previous, value)
+        merged[key] = value
     return merged
 
 
@@ -201,8 +212,15 @@ def build_config(endpoints, model_defaults):
             template = endpoint.reasoning_templates.get(model_id)
             if template is not None:
                 generated["model_info"] = {"reasoning_template": template}
-                needs_reasoning_hook = needs_reasoning_hook or template != "passthrough"
-            entries.append(merge_model_defaults(generated, model_defaults))
+            entry = merge_settings(model_defaults, generated)
+            entry = merge_settings(entry, endpoint.model_overrides.get(model_id, {}))
+            entries.append(entry)
+            model_info = entry.get("model_info")
+            if (
+                isinstance(model_info, dict)
+                and model_info.get("reasoning_template") in ACTIVE_REASONING_TEMPLATES
+            ):
+                needs_reasoning_hook = True
     config = {"model_list": entries}
     if needs_reasoning_hook:
         config["litellm_settings"] = {"callbacks": [REASONING_CALLBACK]}
@@ -262,8 +280,8 @@ def main():
         "input",
         type=Path,
         help=(
-            "endpoint definitions, optional reasoning templates, and model defaults in YAML "
-            "(.yaml or .yml, case-insensitive) or JSON (all other filenames)"
+            "endpoint definitions, optional reasoning templates, model defaults, and model overrides "
+            "in YAML (.yaml or .yml, case-insensitive) or JSON (all other filenames)"
         ),
     )
     parser.add_argument(
@@ -277,6 +295,9 @@ def main():
         config = build_config(endpoints, model_defaults)
     except GenerationError as error:
         print(f"Error: {error}", file=sys.stderr)
+        return 1
+    except RecursionError:
+        print("Error: Could not merge the model settings.", file=sys.stderr)
         return 1
     try:
         write_config(args.output, config)

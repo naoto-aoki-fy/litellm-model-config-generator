@@ -6,19 +6,32 @@ Save at least one endpoint in a JSON or YAML file. The generator reads `.yaml` a
 
 Use the optional `model_defaults` mapping alongside `endpoints` to apply common settings to every generated `model_list` entry. Omit it or use `{}` to generate entries without common settings.
 
+Use the optional `model_overrides` mapping within an endpoint to apply settings to individual models. Each key must be the exact string ID returned by that endpoint's `/models` response, and each value must be a mapping of settings. The example applies the override only to `deepseek-ai/DeepSeek-V4-Flash` from `riken`. Omit `model_overrides` or use `{}` to leave an endpoint without overrides. The generator skips IDs that the endpoint did not return.
+
 ```json
 {
   "endpoints": [
-    {"name": "east", "url": "https://east.example.com/v1", "api_key": "key-east"},
+    {
+      "name": "riken",
+      "url": "https://api.class2.llm.ai.r-ccs.riken.jp/v1/",
+      "api_key": "sk-xxxx",
+      "model_overrides": {
+        "deepseek-ai/DeepSeek-V4-Flash": {
+          "litellm_params": {
+            "use_chat_completions_api": true
+          },
+          "model_info": {
+            "supports_reasoning": true,
+            "reasoning_effort_levels": ["none", "low", "medium", "high"]
+          }
+        }
+      }
+    },
     {"name": "west", "url": "https://west.example.com", "api_key": "key-west"}
   ],
   "model_defaults": {
-    "litellm_params": {
-      "use_chat_completions_api": true
-    },
     "model_info": {
-      "supports_reasoning": true,
-      "reasoning_effort_levels": ["none", "low", "medium", "high"]
+      "supports_reasoning": false
     }
   }
 }
@@ -28,21 +41,27 @@ The same configuration in `endpoints.yaml` uses the same field names. Quote YAML
 
 ```yaml
 endpoints:
-  - name: east
-    url: https://east.example.com/v1
-    api_key: "key-east"
+  - name: riken
+    url: https://api.class2.llm.ai.r-ccs.riken.jp/v1/
+    api_key: "sk-xxxx"
+    model_overrides:
+      deepseek-ai/DeepSeek-V4-Flash:
+        litellm_params:
+          use_chat_completions_api: true
+        model_info:
+          supports_reasoning: true
+          reasoning_effort_levels: [none, low, medium, high]
   - name: west
     url: https://west.example.com
     api_key: "key-west"
 model_defaults:
-  litellm_params:
-    use_chat_completions_api: true
   model_info:
-    supports_reasoning: true
-    reasoning_effort_levels: [none, low, medium, high]
+    supports_reasoning: false
 ```
 
-The generator recursively merges mappings and copies keys that appear on just one side. If a key appears in both the generated entry and `model_defaults`, both values must be mappings. For example, setting `litellm_params.model` in `model_defaults` causes a conflict even when its value matches the generated value. The error identifies the conflicting key path, omits the values, and leaves any existing output file intact.
+For each model, the generator starts with `model_defaults`, overlays generated settings such as the public model name, connection parameters, and any matching `reasoning_templates` entry, then applies a matching `model_overrides` entry. When both values for a key are mappings, the generator merges them recursively. In all other cases, the later value replaces the earlier one, including whole lists. Adding `use_chat_completions_api` under `litellm_params` preserves `model`, `api_base`, and `api_key`. An override can also supply a replacement for any of those keys.
+
+The generator validates the shape of `model_overrides` before contacting any endpoint. Invalid entries leave any existing output file intact, and error messages omit the input values.
 
 Install the dependency and run the generator with either input file.
 
@@ -91,8 +110,8 @@ upstream that accepts `chat_template_kwargs` in the body. With
 Use a LiteLLM Proxy version that supports the per-attempt deployment hook
 (verified with 1.111.0). Put `reasoning_transform.py` beside the generated YAML
 in the Proxy's filesystem. For a container, mount both files in the same
-directory. The generator registers the module when at least one discovered
-deployment uses `enable_thinking` or `thinking_mode`. The hook reads
+directory. The generator registers the module when at least one deployment's
+merged settings select `enable_thinking` or `thinking_mode`. The hook reads
 `model_info.reasoning_template` from the deployment selected for each attempt.
 
 After editing the endpoint mappings, regenerate the configuration and restart
