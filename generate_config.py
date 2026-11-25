@@ -155,6 +155,32 @@ def build_config(endpoints):
     return {"model_list": entries}
 
 
+class _QuotedYamlString(str):
+    """A string that PyYAML should emit with double quotes."""
+
+
+def _represent_quoted_yaml_string(dumper, value):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
+
+
+yaml.SafeDumper.add_representer(_QuotedYamlString, _represent_quoted_yaml_string)
+
+
+def _quote_yaml_line_separators(value):
+    # PyYAML can fold literal NEL characters to spaces in multiline scalars.
+    # Double quotes let PyYAML escape the Unicode line separators.
+    if isinstance(value, str) and any(separator in value for separator in "\x85\u2028\u2029"):
+        return _QuotedYamlString(value)
+    if isinstance(value, list):
+        return [_quote_yaml_line_separators(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _quote_yaml_line_separators(key): _quote_yaml_line_separators(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def write_config(path, config):
     temporary_path = None
     try:
@@ -163,7 +189,7 @@ def write_config(path, config):
         ) as output:
             temporary_path = Path(output.name)
             yaml.safe_dump(
-                config,
+                _quote_yaml_line_separators(config),
                 output,
                 default_flow_style=False,
                 sort_keys=False,

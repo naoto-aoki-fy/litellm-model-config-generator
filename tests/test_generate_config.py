@@ -161,6 +161,17 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertEqual(len(yaml.safe_load(output_path.read_text(encoding="utf-8"))["model_list"]), 4)
         self.assertFalse((self.directory / "config.yaml").exists())
 
+    def test_unicode_model_id_survives_yaml_round_trip(self):
+        model_id = "東京/😀\x85line\u2028separator\u2029end"
+        self.server.replies[EAST_PATH] = (200, model_list(model_id))
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        contents = (self.directory / "config.yaml").read_text(encoding="utf-8")
+        self.assertIn("東京/", contents)
+        entry = yaml.safe_load(contents)["model_list"][0]
+        self.assertEqual(entry["model_name"], model_id)
+        self.assertEqual(entry["litellm_params"]["model"], f"openai/{model_id}")
+
     def test_output_cannot_be_the_input_path(self):
         self.assert_input_preserved(self.input_path.name)
 
