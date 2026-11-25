@@ -606,6 +606,127 @@ class GenerateConfigTests(unittest.TestCase):
             {"model_list": []},
         )
 
+    def test_exact_exclusion_is_endpoint_specific_and_precedes_duplicate_detection(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["endpoints"][0]["exclude_models"] = ["shared"]
+        self.server.replies[EAST_PATH] = (200, model_list("east-only", "shared", "after-shared"))
+        self.server.replies[WEST_PATH] = (200, model_list("west-only", "shared", "east/shared"))
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            with self.subTest(extension=extension):
+                self.input_path = self.input_path.with_suffix(extension)
+                self.input_path.write_text(dump(document), encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = yaml.safe_load((self.directory / "config.yaml").read_text())
+                self.assertEqual([
+                    (entry["model_name"], entry["litellm_params"]["api_base"])
+                    for entry in config["model_list"]
+                ], [
+                    ("east-only", self.east_base),
+                    ("after-shared", self.east_base),
+                    ("west-only", self.west_base),
+                    ("shared", self.west_base),
+                    ("east/shared", self.west_base),
+                ])
+
+    def test_wildcards_match_whole_case_sensitive_original_ids(self):
+        self.write_input([{
+            "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+            "exclude_models": ["deepseek-ai/*", "*-preview", "chat-?", "embed-[abc]", "rank-[!abc]"],
+        }])
+        self.server.replies[EAST_PATH] = (200, model_list(
+            "deepseek-ai/nested/model", "deepseek-ai/", "vendor/deepseek-ai/model",
+            "vendor/model-preview", "vendor/model-preview-old", "vendor/model-Preview",
+            "chat-1", "chat-10", "embed-b", "embed-d", "rank-x", "rank-c",
+        ))
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = yaml.safe_load((self.directory / "config.yaml").read_text())
+        self.assertEqual([entry["model_name"] for entry in config["model_list"]], [
+            "vendor/deepseek-ai/model", "vendor/model-preview-old", "vendor/model-Preview",
+            "chat-10", "embed-d", "rank-c",
+        ])
+
+    def test_empty_and_unmatched_exclusions_match_omitted_exclusions(self):
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_path = self.directory / "config.yaml"
+        expected = output_path.read_bytes()
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for patterns in ([], ["missing-*", "east/shared", "openai/east-only"]):
+            with self.subTest(patterns=patterns):
+                document["endpoints"][0]["exclude_models"] = patterns
+                self.input_path.write_text(json.dumps(document), encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output_path.read_bytes(), expected)
+
+    def test_excluded_models_skip_settings_and_callback_registration(self):
+        self.write_input([{
+            "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+            "exclude_models": ["*"],
+            "model_defaults": {"model_info": {"reasoning_template": "enable_thinking"}},
+            "model_overrides": {"shared": {"model_name": "revived-by-override"}},
+        }, {
+            "name": "west", "url": self.west_base, "api_key": WEST_KEY,
+            "exclude_models": ["shared"],
+            "reasoning_templates": {"shared": "thinking_mode"},
+            "model_overrides": {"shared": {"model_name": "also-revived-by-override"}},
+        }])
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = yaml.safe_load((self.directory / "config.yaml").read_text())
+        self.assertEqual(config, {"model_list": [{
+            "model_name": "west-only",
+            "litellm_params": {
+                "model": "openai/west-only", "api_base": self.west_base, "api_key": WEST_KEY,
+            },
+        }]})
+
+    def test_excluding_all_models_produces_an_empty_model_list(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for endpoint in document["endpoints"]:
+            endpoint["exclude_models"] = ["*"]
+        self.input_path.write_text(json.dumps(document), encoding="utf-8")
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests, [
+            (EAST_PATH, "Bearer " + EAST_KEY),
+            (WEST_PATH, "Bearer " + WEST_KEY),
+        ])
+        self.assertEqual((self.directory / "config.yaml").read_text(), "model_list: []\n")
+
+    def test_invalid_exclusions_preserve_output_before_discovery(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        self.input_path.unlink()
+        invalid_cases = (
+            (None, "must be an array"),
+            ("private-pattern", "must be an array"),
+            ({"private-pattern": True}, "must be an array"),
+            (["private-pattern", {"private-value": True}], "must contain only nonempty strings"),
+            (["private-pattern", False], "must contain only nonempty strings"),
+            (["private-pattern", ""], "must contain only nonempty strings"),
+        )
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path = self.input_path.with_suffix(extension)
+            for patterns, error in invalid_cases:
+                with self.subTest(extension=extension, patterns=patterns):
+                    document["endpoints"][1]["exclude_models"] = patterns
+                    self.input_path.write_text(dump(document), encoding="utf-8")
+                    message = f"Endpoint 2 exclude_models {error}."
+                    result = self.assert_preserved_on_failure(message)
+                    self.assertEqual(result.stderr, f"Error: {message}\n")
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.server.requests, [])
+            self.input_path.unlink()
+
+    def test_exclusions_do_not_bypass_model_list_validation(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["endpoints"][1]["exclude_models"] = ["*"]
+        self.input_path.write_text(json.dumps(document), encoding="utf-8")
+        self.server.replies[WEST_PATH] = (200, model_list("shared", False))
+        self.assert_preserved_on_failure("Endpoint 2 returned an invalid model list.")
+
     def test_authentication_error_preserves_output(self):
         self.server.replies[WEST_PATH] = (401, {"error": WEST_KEY})
         self.assert_preserved_on_failure("Endpoint 2 returned HTTP 401")

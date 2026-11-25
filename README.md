@@ -8,6 +8,8 @@ Use the optional `model_defaults` mapping in each endpoint to apply settings to 
 
 Use the optional `model_overrides` mapping within an endpoint to apply settings to individual models. Each key must be the exact string ID returned by that endpoint's `/models` response, and each value must be a mapping of settings. The example applies the override only to `deepseek-ai/DeepSeek-V4-Flash` from `riken`. Omit `model_overrides` or use `{}` to leave an endpoint without overrides. The generator skips IDs that the endpoint did not return.
 
+Use the optional `exclude_models` array within an endpoint to omit models whose IDs match any of its patterns. The generator uses Python's `fnmatch.fnmatchcase` to match the entire original model ID with case sensitivity. Use `*` for zero or more characters (including `/`), `?` for one character, `[abc]` for one of the listed characters, or `[!abc]` for one character outside the list. A pattern such as `specific-model` matches that exact ID. Omit `exclude_models` or use `[]` to keep all models. Patterns with no matches have no effect.
+
 ```json
 {
   "endpoints": [
@@ -36,6 +38,7 @@ Use the optional `model_overrides` mapping within an endpoint to apply settings 
       "name": "west",
       "url": "https://west.example.com",
       "api_key": "key-west",
+      "exclude_models": ["deepseek-ai/*", "*-preview", "specific-model"],
       "model_defaults": {
         "model_info": {
           "supports_reasoning": false
@@ -66,6 +69,10 @@ endpoints:
   - name: west
     url: https://west.example.com
     api_key: "key-west"
+    exclude_models:
+      - "deepseek-ai/*"
+      - "*-preview"
+      - "specific-model"
     model_defaults:
       model_info:
         supports_reasoning: false
@@ -73,7 +80,7 @@ endpoints:
 
 For each model, the generator starts with its endpoint's `model_defaults`, overlays generated settings such as the public model name, connection parameters, and any matching `reasoning_templates` entry, then applies a matching `model_overrides` entry. When both values for a key are mappings, the generator merges them recursively. In all other cases, the later value replaces the earlier one, including whole lists. Adding `use_chat_completions_api` under `litellm_params` preserves `model`, `api_base`, and `api_key`. An override can also supply a replacement for any of those keys.
 
-The generator validates `model_defaults` and `model_overrides` before contacting any endpoint. If an endpoint's `model_defaults` is invalid, the error identifies the endpoint by its position in the input. Invalid entries leave any existing output file intact, and error messages omit the input values.
+The generator validates `model_defaults`, `model_overrides`, and `exclude_models` before contacting any endpoint. Every element of `exclude_models` must be a nonempty string. Errors for invalid endpoint settings identify the endpoint by its position in the input. Invalid entries leave any existing output file intact, and error messages omit the input values.
 
 Install the dependency and run the generator with either input file.
 
@@ -84,7 +91,7 @@ python3 generate_config.py endpoints.yaml
 litellm --config config.yaml
 ```
 
-Use `-o PATH` to write to a different location. Choose a destination separate from the input file. The generator adds `/v1` where needed and prefixes shared model IDs with the endpoint name, for example `east/shared-model`. The generated file contains API keys.
+Use `-o PATH` to write to a different location. Choose a destination separate from the input file. The generator adds `/v1` where needed and applies exclusions after validating each endpoint's model list. It prefixes IDs that are still shared with the endpoint name, for example `east/shared-model`, and applies defaults, overrides, and reasoning templates only to the remaining models. If all models are excluded, the generator successfully writes `model_list: []`. The generated file contains API keys.
 
 The `litellm` command requires the LiteLLM Proxy CLI. See the [official LiteLLM setup and configuration examples](https://docs.litellm.ai/docs/).
 

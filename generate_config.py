@@ -4,6 +4,7 @@
 import argparse
 from collections import Counter
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from http.client import HTTPException
 import json
 import os
@@ -35,6 +36,7 @@ class Endpoint:
     reasoning_templates: dict[str, str] = field(default_factory=dict)
     model_overrides: dict[str, dict] = field(default_factory=dict)
     model_defaults: dict = field(default_factory=dict)
+    exclude_models: list[str] = field(default_factory=list)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -104,6 +106,13 @@ def read_input(path):
             api_base = normalize_url(url)
         except ValueError:
             raise GenerationError(f"Endpoint {position} has an invalid HTTP(S) base URL.") from None
+        exclude_models = item.get("exclude_models", [])
+        if not isinstance(exclude_models, list):
+            raise GenerationError(f"Endpoint {position} exclude_models must be an array.")
+        if not all(isinstance(pattern, str) and pattern for pattern in exclude_models):
+            raise GenerationError(
+                f"Endpoint {position} exclude_models must contain only nonempty strings."
+            )
         model_defaults = item.get("model_defaults", {})
         if not isinstance(model_defaults, dict):
             raise GenerationError(f"Endpoint {position} model_defaults must be a mapping.")
@@ -137,6 +146,7 @@ def read_input(path):
             reasoning_templates=reasoning_templates,
             model_overrides=model_overrides,
             model_defaults=model_defaults,
+            exclude_models=exclude_models,
         ))
         names.add(name)
     return endpoints
@@ -179,7 +189,11 @@ def fetch_model_ids(opener, endpoint, position):
         for item in data
     ):
         raise GenerationError(f"Endpoint {position} returned an invalid model list.")
-    return list(dict.fromkeys(item["id"] for item in data))
+    model_ids = dict.fromkeys(item["id"] for item in data)
+    return [
+        model_id for model_id in model_ids
+        if not any(fnmatchcase(model_id, pattern) for pattern in endpoint.exclude_models)
+    ]
 
 
 def merge_settings(base, overlay):
@@ -293,7 +307,8 @@ def main():
         "input",
         type=Path,
         help=(
-            "endpoint definitions with optional reasoning templates, model defaults, and model overrides "
+            "endpoint definitions with optional exclude_models wildcard patterns, "
+            "reasoning templates, model defaults, and model overrides "
             "in YAML (.yaml or .yml, case-insensitive) or JSON (all other filenames)"
         ),
     )
