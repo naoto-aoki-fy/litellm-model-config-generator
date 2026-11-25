@@ -107,6 +107,7 @@ class GenerateConfigTests(unittest.TestCase):
             {path.name for path in self.directory.iterdir()},
             {output_path.name, self.input_path.name},
         )
+        return result
 
     def assert_input_preserved(self, output_path):
         original = self.input_path.read_bytes()
@@ -176,6 +177,98 @@ class GenerateConfigTests(unittest.TestCase):
                 result = self.run_generator()
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output_path.read_bytes(), expected)
+
+    def test_model_defaults_apply_to_all_models_in_both_input_formats(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["model_defaults"] = {
+            "litellm_params": {
+                "use_chat_completions_api": True,
+                "custom_parameter": {"options": [False, "custom"]},
+            },
+            "model_info": {
+                "supports_reasoning": True,
+                "reasoning_effort_levels": ["none", "low", "medium", "high"],
+            },
+            "custom_field": {"allocation": [3, 1, 2]},
+        }
+        self.input_path.write_text(json.dumps(document), encoding="utf-8")
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_path = self.directory / "config.yaml"
+        json_output = output_path.read_bytes()
+        self.input_path = self.directory / "endpoints.yaml"
+        self.input_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output_path.read_bytes(), json_output)
+
+        expected_entries = [
+            ("east/shared", "shared", self.east_base, EAST_KEY),
+            ("east-only", "east-only", self.east_base, EAST_KEY),
+            ("west-only", "west-only", self.west_base, WEST_KEY),
+            ("west/shared", "shared", self.west_base, WEST_KEY),
+        ]
+        entries = yaml.safe_load(json_output)["model_list"]
+        self.assertEqual(len(entries), len(expected_entries))
+        for entry, (public_name, model_id, api_base, api_key) in zip(entries, expected_entries):
+            with self.subTest(model=public_name):
+                self.assertEqual(entry, {
+                    "model_name": public_name,
+                    "litellm_params": {
+                        "model": f"openai/{model_id}",
+                        "api_base": api_base,
+                        "api_key": api_key,
+                        "use_chat_completions_api": True,
+                        "custom_parameter": {"options": [False, "custom"]},
+                    },
+                    "model_info": {
+                        "supports_reasoning": True,
+                        "reasoning_effort_levels": ["none", "low", "medium", "high"],
+                    },
+                    "custom_field": {"allocation": [3, 1, 2]},
+                })
+                self.assertIs(entry["litellm_params"]["use_chat_completions_api"], True)
+                self.assertIs(entry["model_info"]["supports_reasoning"], True)
+
+    def test_empty_model_defaults_match_omitted_defaults(self):
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_path = self.directory / "config.yaml"
+        expected = output_path.read_bytes()
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        document["model_defaults"] = {}
+        self.input_path.write_text(json.dumps(document), encoding="utf-8")
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output_path.read_bytes(), expected)
+
+    def test_model_defaults_conflicts_report_only_the_key_path(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for defaults, key_path in (
+            ({"litellm_params": {"model": "openai/shared"}}, "litellm_params.model"),
+            ({"litellm_params": {"api_key": "private-default"}}, "litellm_params.api_key"),
+            ({"litellm_params": "private-default"}, "litellm_params"),
+            ({"model_name": {"nested": "private-default"}}, "model_name"),
+        ):
+            with self.subTest(key_path=key_path):
+                document["model_defaults"] = defaults
+                self.input_path.write_text(json.dumps(document), encoding="utf-8")
+                message = f"Conflicting model setting: {key_path}"
+                result = self.assert_preserved_on_failure(message)
+                self.assertEqual(result.stderr, f"Error: {message}\n")
+                self.assertEqual(result.stdout, "")
+
+    def test_model_defaults_must_be_a_mapping(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for value in (None, False, 0, "private-default", ["private-default"]):
+            with self.subTest(value_type=type(value).__name__):
+                document["model_defaults"] = value
+                self.input_path.write_text(json.dumps(document), encoding="utf-8")
+                message = "model_defaults must be a mapping."
+                result = self.assert_preserved_on_failure(message)
+                self.assertEqual(result.stderr, f"Error: {message}\n")
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(self.server.requests, [])
 
     def test_yaml_syntax_error_preserves_output_and_hides_input(self):
         self.input_path.unlink()

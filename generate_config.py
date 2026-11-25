@@ -53,7 +53,7 @@ def normalize_url(url):
     return url if parts.path.rstrip("/").endswith("/v1") else url + "/v1"
 
 
-def read_endpoints(path):
+def read_input(path):
     is_yaml = path.suffix.lower() in (".yaml", ".yml")
     input_format = "YAML" if is_yaml else "JSON"
     load_error = f"Could not read the endpoints {input_format} file."
@@ -74,6 +74,10 @@ def read_endpoints(path):
         raise GenerationError("The input must contain an endpoints array.")
     if not document["endpoints"]:
         raise GenerationError("At least one connection destination is required.")
+
+    model_defaults = document.get("model_defaults", {})
+    if not isinstance(model_defaults, dict):
+        raise GenerationError("model_defaults must be a mapping.")
 
     endpoints = []
     names = set()
@@ -96,7 +100,7 @@ def read_endpoints(path):
             raise GenerationError(f"Endpoint {position} has an invalid HTTP(S) base URL.") from None
         endpoints.append(Endpoint(name, api_base, api_key))
         names.add(name)
-    return endpoints
+    return endpoints, model_defaults
 
 
 def validate_output_path(input_path, output_path):
@@ -139,7 +143,20 @@ def fetch_model_ids(opener, endpoint, position):
     return list(dict.fromkeys(item["id"] for item in data))
 
 
-def build_config(endpoints):
+def merge_model_defaults(generated, defaults, path=()):
+    merged = generated.copy()
+    for key, value in defaults.items():
+        if key not in generated:
+            merged[key] = value
+            continue
+        key_path = (*path, key)
+        if not isinstance(generated[key], dict) or not isinstance(value, dict):
+            raise GenerationError("Conflicting model setting: " + ".".join(key_path))
+        merged[key] = merge_model_defaults(generated[key], value, key_path)
+    return merged
+
+
+def build_config(endpoints, model_defaults):
     opener = build_opener(NoRedirects())
     endpoint_models = [
         (endpoint, fetch_model_ids(opener, endpoint, position))
@@ -154,14 +171,15 @@ def build_config(endpoints):
             if public_name in public_names:
                 raise GenerationError("Generated public model names conflict.")
             public_names.add(public_name)
-            entries.append({
+            generated = {
                 "model_name": public_name,
                 "litellm_params": {
                     "model": f"openai/{model_id}",
                     "api_base": endpoint.api_base,
                     "api_key": endpoint.api_key,
                 },
-            })
+            }
+            entries.append(merge_model_defaults(generated, model_defaults))
     return {"model_list": entries}
 
 
@@ -218,8 +236,8 @@ def main():
         "input",
         type=Path,
         help=(
-            "endpoint definitions in YAML (.yaml or .yml, case-insensitive) "
-            "or JSON (all other filenames)"
+            "endpoint definitions and optional model defaults in YAML "
+            "(.yaml or .yml, case-insensitive) or JSON (all other filenames)"
         ),
     )
     parser.add_argument(
@@ -228,15 +246,15 @@ def main():
     )
     args = parser.parse_args()
     try:
-        endpoints = read_endpoints(args.input)
+        endpoints, model_defaults = read_input(args.input)
         validate_output_path(args.input, args.output)
-        config = build_config(endpoints)
+        config = build_config(endpoints, model_defaults)
     except GenerationError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
     try:
         write_config(args.output, config)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         print("Error: Could not write the configuration.", file=sys.stderr)
         return 1
     return 0
