@@ -187,6 +187,19 @@ class GenerateConfigTests(unittest.TestCase):
         self.assert_preserved_on_failure("Could not read the endpoints YAML file.")
         self.assertEqual(self.server.requests, [])
 
+    def test_invalid_yaml_scalar_tags_preserve_output_and_hide_keys(self):
+        self.input_path.unlink()
+        self.input_path = self.directory / "endpoints.yaml"
+        for scalar in (f'!!bool "{EAST_KEY}"', f'!!timestamp "{EAST_KEY}"', '!!int ""'):
+            with self.subTest(tag=scalar.split()[0]):
+                self.input_path.write_text(
+                    f"endpoints:\n  - name: east\n    url: {self.east_base}\n"
+                    f"    api_key: {scalar}\n",
+                    encoding="utf-8",
+                )
+                self.assert_preserved_on_failure("Could not read the endpoints YAML file.")
+                self.assertEqual(self.server.requests, [])
+
     def test_yaml_required_field_type_mismatches_preserve_output_and_hide_keys(self):
         self.input_path.unlink()
         self.input_path = self.directory / "endpoints.yml"

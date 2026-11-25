@@ -55,15 +55,20 @@ def normalize_url(url):
 
 def read_endpoints(path):
     is_yaml = path.suffix.lower() in (".yaml", ".yml")
+    input_format = "YAML" if is_yaml else "JSON"
+    load_error = f"Could not read the endpoints {input_format} file."
     try:
         with path.open(encoding="utf-8") as source:
             if is_yaml:
-                document = yaml.safe_load(source)
+                try:
+                    document = yaml.safe_load(source)
+                except Exception:
+                    # PyYAML can include secret scalar values in built-in exceptions.
+                    raise GenerationError(load_error) from None
             else:
                 document = json.load(source, parse_constant=reject_json_constant)
-    except (OSError, ValueError, RecursionError, yaml.YAMLError):
-        input_format = "YAML" if is_yaml else "JSON"
-        raise GenerationError(f"Could not read the endpoints {input_format} file.") from None
+    except (OSError, ValueError, RecursionError):
+        raise GenerationError(load_error) from None
 
     if not isinstance(document, dict) or not isinstance(document.get("endpoints"), list):
         raise GenerationError("The input must contain an endpoints array.")
