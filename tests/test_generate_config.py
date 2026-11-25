@@ -92,6 +92,80 @@ class GenerateConfigTests(unittest.TestCase):
             timeout=10,
         )
 
+    def test_reasoning_templates_match_exact_ids_per_endpoint_in_both_formats(self):
+        endpoints = [
+            {
+                "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+                "reasoning_templates": {
+                    "shared": "enable_thinking",
+                    "east-only": "passthrough",
+                    "west-only": "enable_thinking",
+                    "SHARED": "thinking_mode",
+                },
+            },
+            {
+                "name": "west", "url": self.west_base, "api_key": WEST_KEY,
+                "reasoning_templates": {"shared": "thinking_mode"},
+            },
+        ]
+        document = {
+            "endpoints": endpoints,
+            "model_defaults": {"model_info": {"supports_reasoning": True}},
+        }
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            with self.subTest(extension=extension):
+                self.input_path = self.input_path.with_suffix(extension)
+                self.input_path.write_text(dump(document), encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = yaml.safe_load((self.directory / "config.yaml").read_text())
+                self.assertEqual(config["litellm_settings"]["callbacks"], ["reasoning_transform.handler"])
+                self.assertEqual({
+                    entry["model_name"]: entry["model_info"] for entry in config["model_list"]
+                }, {
+                    "east/shared": {"reasoning_template": "enable_thinking", "supports_reasoning": True},
+                    "east-only": {"reasoning_template": "passthrough", "supports_reasoning": True},
+                    "west/shared": {"reasoning_template": "thinking_mode", "supports_reasoning": True},
+                    "west-only": {"supports_reasoning": True},
+                })
+
+    def test_reasoning_templates_without_matching_transform_do_not_register_callback(self):
+        self.write_input([{
+            "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+            "reasoning_templates": {"shared": "passthrough", "unknown": "thinking_mode"},
+        }])
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = yaml.safe_load((self.directory / "config.yaml").read_text())
+        self.assertNotIn("litellm_settings", config)
+        shared, unlisted = config["model_list"]
+        self.assertEqual(shared["model_info"], {"reasoning_template": "passthrough"})
+        self.assertNotIn("model_info", unlisted)
+
+    def test_invalid_reasoning_templates_preserve_output_before_discovery(self):
+        invalid_cases = [
+            (None, "must be a mapping"),
+            ([], "must be a mapping"),
+            ({42: "passthrough"}, "must have string model IDs"),
+            ({"unknown": "enable-thinkng"}, "values must be"),
+            ({"unknown": ["enable_thinking"]}, "values must be"),
+            ({"unknown": True}, "values must be"),
+            ({"unknown": None}, "values must be"),
+        ]
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path.unlink()
+            self.input_path = self.input_path.with_suffix(extension)
+            for mapping, error in invalid_cases:
+                if extension == ".json" and isinstance(mapping, dict) and 42 in mapping:
+                    continue  # JSON object keys are always strings.
+                with self.subTest(extension=extension, mapping=mapping):
+                    self.input_path.write_text(dump({"endpoints": [{
+                        "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+                        "reasoning_templates": mapping,
+                    }]}), encoding="utf-8")
+                    self.assert_preserved_on_failure("reasoning_templates " + error)
+        self.assertEqual(self.server.requests, [])
+
     def assert_preserved_on_failure(self, message):
         output_path = self.directory / "config.yaml"
         output_path.write_bytes(b"existing configuration\n")

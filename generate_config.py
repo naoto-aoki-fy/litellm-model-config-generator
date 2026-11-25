@@ -3,7 +3,7 @@
 
 import argparse
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.client import HTTPException
 import json
 import os
@@ -18,6 +18,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import yaml
 
 
+REASONING_TEMPLATES = {"enable_thinking", "thinking_mode", "passthrough"}
+REASONING_CALLBACK = "reasoning_transform.handler"
+
+
 class GenerationError(Exception):
     """An error that can be reported without exposing endpoint data."""
 
@@ -27,6 +31,7 @@ class Endpoint:
     name: str
     api_base: str
     api_key: str
+    reasoning_templates: dict[str, str] = field(default_factory=dict)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -98,7 +103,20 @@ def read_input(path):
             api_base = normalize_url(url)
         except ValueError:
             raise GenerationError(f"Endpoint {position} has an invalid HTTP(S) base URL.") from None
-        endpoints.append(Endpoint(name, api_base, api_key))
+        reasoning_templates = item.get("reasoning_templates", {})
+        if not isinstance(reasoning_templates, dict):
+            raise GenerationError(f"Endpoint {position} reasoning_templates must be a mapping.")
+        for model_id, template in reasoning_templates.items():
+            if not isinstance(model_id, str):
+                raise GenerationError(
+                    f"Endpoint {position} reasoning_templates must have string model IDs."
+                )
+            if not isinstance(template, str) or template not in REASONING_TEMPLATES:
+                raise GenerationError(
+                    f"Endpoint {position} reasoning_templates values must be "
+                    "enable_thinking, thinking_mode, or passthrough."
+                )
+        endpoints.append(Endpoint(name, api_base, api_key, reasoning_templates))
         names.add(name)
     return endpoints, model_defaults
 
@@ -165,6 +183,7 @@ def build_config(endpoints, model_defaults):
     counts = Counter(model_id for _, model_ids in endpoint_models for model_id in model_ids)
     entries = []
     public_names = set()
+    needs_reasoning_hook = False
     for endpoint, model_ids in endpoint_models:
         for model_id in model_ids:
             public_name = model_id if counts[model_id] == 1 else f"{endpoint.name}/{model_id}"
@@ -179,8 +198,15 @@ def build_config(endpoints, model_defaults):
                     "api_key": endpoint.api_key,
                 },
             }
+            template = endpoint.reasoning_templates.get(model_id)
+            if template is not None:
+                generated["model_info"] = {"reasoning_template": template}
+                needs_reasoning_hook = needs_reasoning_hook or template != "passthrough"
             entries.append(merge_model_defaults(generated, model_defaults))
-    return {"model_list": entries}
+    config = {"model_list": entries}
+    if needs_reasoning_hook:
+        config["litellm_settings"] = {"callbacks": [REASONING_CALLBACK]}
+    return config
 
 
 class _QuotedYamlString(str):
@@ -236,7 +262,7 @@ def main():
         "input",
         type=Path,
         help=(
-            "endpoint definitions and optional model defaults in YAML "
+            "endpoint definitions, optional reasoning templates, and model defaults in YAML "
             "(.yaml or .yml, case-insensitive) or JSON (all other filenames)"
         ),
     )
