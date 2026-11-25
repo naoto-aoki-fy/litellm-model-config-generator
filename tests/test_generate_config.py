@@ -9,6 +9,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 
+import yaml
+
 from generate_config import normalize_url
 
 
@@ -135,7 +137,9 @@ class GenerateConfigTests(unittest.TestCase):
             (WEST_PATH, "Bearer " + WEST_KEY),
         ])
         output_path = self.directory / "config.yaml"
-        entries = json.loads(output_path.read_text(encoding="utf-8"))["model_list"]
+        contents = output_path.read_text(encoding="utf-8")
+        self.assertTrue(contents.startswith("model_list:\n"))
+        entries = yaml.safe_load(contents)["model_list"]
         self.assertEqual(
             [(item["model_name"], item["litellm_params"]) for item in entries],
             [
@@ -154,7 +158,7 @@ class GenerateConfigTests(unittest.TestCase):
         output_path.write_text("old configuration", encoding="utf-8")
         result = self.run_generator("-o", output_path.name)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(json.loads(output_path.read_text(encoding="utf-8"))["model_list"]), 4)
+        self.assertEqual(len(yaml.safe_load(output_path.read_text(encoding="utf-8"))["model_list"]), 4)
         self.assertFalse((self.directory / "config.yaml").exists())
 
     def test_output_cannot_be_the_input_path(self):
@@ -185,7 +189,10 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.server.requests, [(EAST_PATH, "Bearer " + EAST_KEY)])
         output_path = self.directory / "config.yaml"
-        self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), {"model_list": []})
+        self.assertEqual(
+            yaml.safe_load(output_path.read_text(encoding="utf-8")),
+            {"model_list": []},
+        )
 
     def test_authentication_error_preserves_output(self):
         self.server.replies[WEST_PATH] = (401, {"error": WEST_KEY})

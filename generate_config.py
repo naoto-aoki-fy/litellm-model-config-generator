@@ -15,6 +15,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+import yaml
+
 
 class GenerationError(Exception):
     """An error that can be reported without exposing endpoint data."""
@@ -154,21 +156,19 @@ def build_config(endpoints):
 
 
 def write_config(path, config):
-    # JSON is valid YAML. Keep supplementary Unicode characters intact and
-    # escape characters that YAML parsers may reject or treat as line breaks.
-    contents = json.dumps(config, ensure_ascii=False, indent=2)
-    contents = re.sub(
-        r"[\x7f-\x9f\u2028\u2029\ufffe\uffff]",
-        lambda match: f"\\u{ord(match[0]):04x}",
-        contents,
-    )
     temporary_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=path.parent, delete=False
         ) as output:
             temporary_path = Path(output.name)
-            output.write(contents + "\n")
+            yaml.safe_dump(
+                config,
+                output,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+            )
         os.replace(temporary_path, path)
         temporary_path = None
     finally:
