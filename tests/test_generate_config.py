@@ -96,6 +96,7 @@ class GenerateConfigTests(unittest.TestCase):
         endpoints = [
             {
                 "name": "east", "url": self.east_base, "api_key": EAST_KEY,
+                "model_defaults": {"model_info": {"supports_reasoning": True}},
                 "reasoning_templates": {
                     "shared": "enable_thinking",
                     "east-only": "passthrough",
@@ -105,13 +106,11 @@ class GenerateConfigTests(unittest.TestCase):
             },
             {
                 "name": "west", "url": self.west_base, "api_key": WEST_KEY,
+                "model_defaults": {"model_info": {"supports_reasoning": True}},
                 "reasoning_templates": {"shared": "thinking_mode"},
             },
         ]
-        document = {
-            "endpoints": endpoints,
-            "model_defaults": {"model_info": {"supports_reasoning": True}},
-        }
+        document = {"endpoints": endpoints}
         for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
             with self.subTest(extension=extension):
                 self.input_path = self.input_path.with_suffix(extension)
@@ -252,9 +251,10 @@ class GenerateConfigTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output_path.read_bytes(), expected)
 
-    def test_model_defaults_apply_to_all_models_in_both_input_formats(self):
+    def test_model_defaults_apply_only_to_models_from_their_endpoint_in_both_formats(self):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        document["model_defaults"] = {
+        east, west = document["endpoints"]
+        east["model_defaults"] = {
             "litellm_params": {
                 "use_chat_completions_api": True,
                 "custom_parameter": {"options": [False, "custom"]},
@@ -265,56 +265,53 @@ class GenerateConfigTests(unittest.TestCase):
             },
             "custom_field": {"allocation": [3, 1, 2]},
         }
-        self.input_path.write_text(json.dumps(document), encoding="utf-8")
-        result = self.run_generator()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        west_defaults = {
+            "litellm_params": {"use_chat_completions_api": False},
+            "model_info": {"supports_reasoning": False},
+            "custom_field": {"allocation": [4]},
+        }
         output_path = self.directory / "config.yaml"
-        json_output = output_path.read_bytes()
-        self.input_path = self.directory / "endpoints.yaml"
-        self.input_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-        result = self.run_generator()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output_path.read_bytes(), json_output)
-
         expected_entries = [
-            ("east/shared", "shared", self.east_base, EAST_KEY),
-            ("east-only", "east-only", self.east_base, EAST_KEY),
-            ("west-only", "west-only", self.west_base, WEST_KEY),
-            ("west/shared", "shared", self.west_base, WEST_KEY),
+            ("east/shared", "shared", east, self.east_base),
+            ("east-only", "east-only", east, self.east_base),
+            ("west-only", "west-only", west, self.west_base),
+            ("west/shared", "shared", west, self.west_base),
         ]
-        entries = yaml.safe_load(json_output)["model_list"]
-        self.assertEqual(len(entries), len(expected_entries))
-        for entry, (public_name, model_id, api_base, api_key) in zip(entries, expected_entries):
-            with self.subTest(model=public_name):
-                self.assertEqual(entry, {
-                    "model_name": public_name,
-                    "litellm_params": {
-                        "model": f"openai/{model_id}",
-                        "api_base": api_base,
-                        "api_key": api_key,
-                        "use_chat_completions_api": True,
-                        "custom_parameter": {"options": [False, "custom"]},
-                    },
-                    "model_info": {
-                        "supports_reasoning": True,
-                        "reasoning_effort_levels": ["none", "low", "medium", "high"],
-                    },
-                    "custom_field": {"allocation": [3, 1, 2]},
-                })
-                self.assertIs(entry["litellm_params"]["use_chat_completions_api"], True)
-                self.assertIs(entry["model_info"]["supports_reasoning"], True)
-
-    def test_empty_model_defaults_match_omitted_defaults(self):
-        result = self.run_generator()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        output_path = self.directory / "config.yaml"
-        expected = output_path.read_bytes()
-        document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        document["model_defaults"] = {}
-        self.input_path.write_text(json.dumps(document), encoding="utf-8")
-        result = self.run_generator()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output_path.read_bytes(), expected)
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path = self.input_path.with_suffix(extension)
+            for defaults_setting in (west_defaults, None, {}):
+                with self.subTest(extension=extension, west_defaults=defaults_setting):
+                    if defaults_setting is None:
+                        west.pop("model_defaults", None)
+                    else:
+                        west["model_defaults"] = defaults_setting
+                    self.input_path.write_text(dump(document), encoding="utf-8")
+                    output_path.unlink(missing_ok=True)
+                    result = self.run_generator()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    entries = yaml.safe_load(output_path.read_text(encoding="utf-8"))["model_list"]
+                    self.assertEqual(len(entries), len(expected_entries))
+                    for entry, (name, model_id, endpoint, api_base) in zip(entries, expected_entries):
+                        defaults = endpoint.get("model_defaults", {})
+                        self.assertEqual(entry, {
+                            **defaults,
+                            "model_name": name,
+                            "litellm_params": {
+                                **defaults.get("litellm_params", {}),
+                                "model": f"openai/{model_id}",
+                                "api_base": api_base,
+                                "api_key": endpoint["api_key"],
+                            },
+                        })
+                        if defaults:
+                            self.assertIs(
+                                entry["litellm_params"]["use_chat_completions_api"],
+                                defaults["litellm_params"]["use_chat_completions_api"],
+                            )
+                            self.assertIs(
+                                entry["model_info"]["supports_reasoning"],
+                                defaults["model_info"]["supports_reasoning"],
+                            )
 
     def test_model_overrides_match_exact_ids_per_endpoint_in_both_formats(self):
         model_id = "deepseek-ai/DeepSeek-V4-Flash"
@@ -362,14 +359,15 @@ class GenerateConfigTests(unittest.TestCase):
 
     def test_generated_settings_overwrite_model_defaults(self):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        document["endpoints"][0]["reasoning_templates"] = {"shared": "enable_thinking"}
+        east, _ = document["endpoints"]
+        east["reasoning_templates"] = {"shared": "enable_thinking"}
         for params, extra in (
             ({"model": "default-model", "api_base": "default-base", "api_key": "default-key",
               "custom": "preserved"}, {"custom": "preserved"}),
             (["default-params"], {}),
         ):
             with self.subTest(params=params):
-                document["model_defaults"] = {
+                east["model_defaults"] = {
                     "model_name": {"nested": "default-name"},
                     "litellm_params": params,
                     "model_info": {"reasoning_template": "passthrough", "supports_reasoning": True},
@@ -389,7 +387,8 @@ class GenerateConfigTests(unittest.TestCase):
 
     def test_model_overrides_overwrite_generated_and_nested_default_values(self):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        document["model_defaults"] = {
+        east, _ = document["endpoints"]
+        east["model_defaults"] = {
             "custom": {
                 "nested": {
                     "preserved": True, "levels": ["default", "removed"],
@@ -397,7 +396,6 @@ class GenerateConfigTests(unittest.TestCase):
                 },
             },
         }
-        east, _ = document["endpoints"]
         east["reasoning_templates"] = {"shared": "enable_thinking"}
         east["model_overrides"] = {
             "shared": {
@@ -423,7 +421,7 @@ class GenerateConfigTests(unittest.TestCase):
                 },
             },
         })
-        self.assertEqual(config["model_list"][1]["custom"], document["model_defaults"]["custom"])
+        self.assertEqual(config["model_list"][1]["custom"], east["model_defaults"]["custom"])
         self.assertNotIn("litellm_settings", config)
 
     def test_empty_and_undiscovered_model_overrides_match_omitted_overrides(self):
@@ -467,17 +465,35 @@ class GenerateConfigTests(unittest.TestCase):
                     self.assertEqual(self.server.requests, [])
             self.input_path.unlink()
 
-    def test_model_defaults_must_be_a_mapping(self):
+    def test_top_level_model_defaults_require_migration_before_discovery(self):
         document = json.loads(self.input_path.read_text(encoding="utf-8"))
-        for value in (None, False, 0, "private-default", ["private-default"]):
-            with self.subTest(value_type=type(value).__name__):
-                document["model_defaults"] = value
-                self.input_path.write_text(json.dumps(document), encoding="utf-8")
-                message = "model_defaults must be a mapping."
-                result = self.assert_preserved_on_failure(message)
-                self.assertEqual(result.stderr, f"Error: {message}\n")
-                self.assertEqual(result.stdout, "")
-                self.assertEqual(self.server.requests, [])
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path.unlink()
+            self.input_path = self.input_path.with_suffix(extension)
+            for value in ({}, {"custom": "private-default"}, None):
+                with self.subTest(extension=extension, defaults=value):
+                    document["model_defaults"] = value
+                    self.input_path.write_text(dump(document), encoding="utf-8")
+                    message = "Move top-level model_defaults into each endpoint that should use them."
+                    result = self.assert_preserved_on_failure(message)
+                    self.assertEqual(result.stderr, f"Error: {message}\n")
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.server.requests, [])
+
+    def test_invalid_endpoint_model_defaults_preserve_output_before_discovery(self):
+        document = json.loads(self.input_path.read_text(encoding="utf-8"))
+        for extension, dump in ((".json", json.dumps), (".yaml", yaml.safe_dump)):
+            self.input_path.unlink()
+            self.input_path = self.input_path.with_suffix(extension)
+            for value in (None, False, 0, "private-default", ["private-default"]):
+                with self.subTest(extension=extension, value_type=type(value).__name__):
+                    document["endpoints"][1]["model_defaults"] = value
+                    self.input_path.write_text(dump(document), encoding="utf-8")
+                    message = "Endpoint 2 model_defaults must be a mapping."
+                    result = self.assert_preserved_on_failure(message)
+                    self.assertEqual(result.stderr, f"Error: {message}\n")
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(self.server.requests, [])
 
     def test_yaml_syntax_error_preserves_output_and_hides_input(self):
         self.input_path.unlink()

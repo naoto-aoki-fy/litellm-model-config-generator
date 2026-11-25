@@ -4,7 +4,7 @@ Generate a LiteLLM Proxy configuration from the models advertised by OpenAI-comp
 
 Save at least one endpoint in a JSON or YAML file. The generator reads `.yaml` and `.yml` extensions as YAML regardless of case and reads all other filenames as JSON. Give each endpoint a unique name and replace the example keys with your API keys.
 
-Use the optional `model_defaults` mapping alongside `endpoints` to apply common settings to every generated `model_list` entry. Omit it or use `{}` to generate entries without common settings.
+Use the optional `model_defaults` mapping in each endpoint to apply settings to all models it exposes. Omit it or use `{}` to add no defaults for that endpoint. To migrate an existing input, move its top-level `model_defaults` into each endpoint that should use those settings. The generator rejects a top-level `model_defaults`, including `{}`.
 
 Use the optional `model_overrides` mapping within an endpoint to apply settings to individual models. Each key must be the exact string ID returned by that endpoint's `/models` response, and each value must be a mapping of settings. The example applies the override only to `deepseek-ai/DeepSeek-V4-Flash` from `riken`. Omit `model_overrides` or use `{}` to leave an endpoint without overrides. The generator skips IDs that the endpoint did not return.
 
@@ -15,6 +15,11 @@ Use the optional `model_overrides` mapping within an endpoint to apply settings 
       "name": "riken",
       "url": "https://api.class2.llm.ai.r-ccs.riken.jp/v1/",
       "api_key": "sk-xxxx",
+      "model_defaults": {
+        "model_info": {
+          "supports_reasoning": false
+        }
+      },
       "model_overrides": {
         "deepseek-ai/DeepSeek-V4-Flash": {
           "litellm_params": {
@@ -27,13 +32,17 @@ Use the optional `model_overrides` mapping within an endpoint to apply settings 
         }
       }
     },
-    {"name": "west", "url": "https://west.example.com", "api_key": "key-west"}
-  ],
-  "model_defaults": {
-    "model_info": {
-      "supports_reasoning": false
+    {
+      "name": "west",
+      "url": "https://west.example.com",
+      "api_key": "key-west",
+      "model_defaults": {
+        "model_info": {
+          "supports_reasoning": false
+        }
+      }
     }
-  }
+  ]
 }
 ```
 
@@ -44,6 +53,9 @@ endpoints:
   - name: riken
     url: https://api.class2.llm.ai.r-ccs.riken.jp/v1/
     api_key: "sk-xxxx"
+    model_defaults:
+      model_info:
+        supports_reasoning: false
     model_overrides:
       deepseek-ai/DeepSeek-V4-Flash:
         litellm_params:
@@ -54,14 +66,14 @@ endpoints:
   - name: west
     url: https://west.example.com
     api_key: "key-west"
-model_defaults:
-  model_info:
-    supports_reasoning: false
+    model_defaults:
+      model_info:
+        supports_reasoning: false
 ```
 
-For each model, the generator starts with `model_defaults`, overlays generated settings such as the public model name, connection parameters, and any matching `reasoning_templates` entry, then applies a matching `model_overrides` entry. When both values for a key are mappings, the generator merges them recursively. In all other cases, the later value replaces the earlier one, including whole lists. Adding `use_chat_completions_api` under `litellm_params` preserves `model`, `api_base`, and `api_key`. An override can also supply a replacement for any of those keys.
+For each model, the generator starts with its endpoint's `model_defaults`, overlays generated settings such as the public model name, connection parameters, and any matching `reasoning_templates` entry, then applies a matching `model_overrides` entry. When both values for a key are mappings, the generator merges them recursively. In all other cases, the later value replaces the earlier one, including whole lists. Adding `use_chat_completions_api` under `litellm_params` preserves `model`, `api_base`, and `api_key`. An override can also supply a replacement for any of those keys.
 
-The generator validates the shape of `model_overrides` before contacting any endpoint. Invalid entries leave any existing output file intact, and error messages omit the input values.
+The generator validates `model_defaults` and `model_overrides` before contacting any endpoint. If an endpoint's `model_defaults` is invalid, the error identifies the endpoint by its position in the input. Invalid entries leave any existing output file intact, and error messages omit the input values.
 
 Install the dependency and run the generator with either input file.
 

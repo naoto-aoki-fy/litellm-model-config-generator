@@ -34,6 +34,7 @@ class Endpoint:
     api_key: str
     reasoning_templates: dict[str, str] = field(default_factory=dict)
     model_overrides: dict[str, dict] = field(default_factory=dict)
+    model_defaults: dict = field(default_factory=dict)
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -77,14 +78,12 @@ def read_input(path):
     except (OSError, ValueError, RecursionError):
         raise GenerationError(load_error) from None
 
+    if isinstance(document, dict) and "model_defaults" in document:
+        raise GenerationError("Move top-level model_defaults into each endpoint that should use them.")
     if not isinstance(document, dict) or not isinstance(document.get("endpoints"), list):
         raise GenerationError("The input must contain an endpoints array.")
     if not document["endpoints"]:
         raise GenerationError("At least one connection destination is required.")
-
-    model_defaults = document.get("model_defaults", {})
-    if not isinstance(model_defaults, dict):
-        raise GenerationError("model_defaults must be a mapping.")
 
     endpoints = []
     names = set()
@@ -105,6 +104,9 @@ def read_input(path):
             api_base = normalize_url(url)
         except ValueError:
             raise GenerationError(f"Endpoint {position} has an invalid HTTP(S) base URL.") from None
+        model_defaults = item.get("model_defaults", {})
+        if not isinstance(model_defaults, dict):
+            raise GenerationError(f"Endpoint {position} model_defaults must be a mapping.")
         reasoning_templates = item.get("reasoning_templates", {})
         if not isinstance(reasoning_templates, dict):
             raise GenerationError(f"Endpoint {position} reasoning_templates must be a mapping.")
@@ -130,9 +132,14 @@ def read_input(path):
                 raise GenerationError(
                     f"Endpoint {position} model_overrides values must be mappings."
                 )
-        endpoints.append(Endpoint(name, api_base, api_key, reasoning_templates, model_overrides))
+        endpoints.append(Endpoint(
+            name, api_base, api_key,
+            reasoning_templates=reasoning_templates,
+            model_overrides=model_overrides,
+            model_defaults=model_defaults,
+        ))
         names.add(name)
-    return endpoints, model_defaults
+    return endpoints
 
 
 def validate_output_path(input_path, output_path):
@@ -185,7 +192,7 @@ def merge_settings(base, overlay):
     return merged
 
 
-def build_config(endpoints, model_defaults):
+def build_config(endpoints):
     opener = build_opener(NoRedirects())
     endpoint_models = [
         (endpoint, fetch_model_ids(opener, endpoint, position))
@@ -212,7 +219,7 @@ def build_config(endpoints, model_defaults):
             template = endpoint.reasoning_templates.get(model_id)
             if template is not None:
                 generated["model_info"] = {"reasoning_template": template}
-            entry = merge_settings(model_defaults, generated)
+            entry = merge_settings(endpoint.model_defaults, generated)
             entry = merge_settings(entry, endpoint.model_overrides.get(model_id, {}))
             entries.append(entry)
             model_info = entry.get("model_info")
@@ -280,7 +287,7 @@ def main():
         "input",
         type=Path,
         help=(
-            "endpoint definitions, optional reasoning templates, model defaults, and model overrides "
+            "endpoint definitions with optional reasoning templates, model defaults, and model overrides "
             "in YAML (.yaml or .yml, case-insensitive) or JSON (all other filenames)"
         ),
     )
@@ -290,9 +297,9 @@ def main():
     )
     args = parser.parse_args()
     try:
-        endpoints, model_defaults = read_input(args.input)
+        endpoints = read_input(args.input)
         validate_output_path(args.input, args.output)
-        config = build_config(endpoints, model_defaults)
+        config = build_config(endpoints)
     except GenerationError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
