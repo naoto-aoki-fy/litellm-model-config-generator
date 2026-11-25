@@ -1,7 +1,8 @@
+import errno
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -69,17 +70,20 @@ class GenerateConfigTests(unittest.TestCase):
         base = f"http://127.0.0.1:{self.server.server_port}"
         self.east_base = base + "/east/v1"
         self.west_base = base + "/west/v1"
-        self.endpoints = [
+        self.input_path = self.directory / "endpoints.json"
+        self.write_input([
             {"name": "east", "url": self.east_base + "///", "api_key": EAST_KEY},
             {"name": "west", "url": base + "/west/", "api_key": WEST_KEY},
-        ]
+        ])
+
+    def write_input(self, endpoints):
+        self.input_path.write_text(
+            json.dumps({"endpoints": endpoints}), encoding="utf-8"
+        )
 
     def run_generator(self, *args):
-        (self.directory / "endpoints.json").write_text(
-            json.dumps({"endpoints": self.endpoints}), encoding="utf-8"
-        )
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "endpoints.json", *args],
+            [sys.executable, str(SCRIPT), self.input_path.name, *args],
             cwd=self.directory,
             capture_output=True,
             text=True,
@@ -91,7 +95,7 @@ class GenerateConfigTests(unittest.TestCase):
         output_path.write_bytes(b"existing configuration\n")
         existing_inode = output_path.stat().st_ino
         result = self.run_generator()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 1)
         self.assertIn(message, result.stderr)
         for key in (EAST_KEY, WEST_KEY):
             self.assertNotIn(key.strip(), result.stderr + result.stdout)
@@ -101,6 +105,27 @@ class GenerateConfigTests(unittest.TestCase):
             {path.name for path in self.directory.iterdir()},
             {"config.yaml", "endpoints.json"},
         )
+
+    def assert_input_preserved(self, output_path):
+        original = self.input_path.read_bytes()
+        result = self.run_generator("-o", str(output_path))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("The input and output refer to the same file", result.stderr)
+        self.assertEqual(self.input_path.read_bytes(), original)
+        self.assertTrue(self.input_path.samefile(self.directory / output_path))
+        self.assertEqual(self.server.requests, [])
+
+    def create_link(self, create):
+        try:
+            create()
+        except NotImplementedError as error:
+            self.skipTest(f"Link creation is unavailable: {error}")
+        except OSError as error:
+            unsupported = (errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP)
+            # Windows can report unsupported filesystems or missing link privileges.
+            if error.errno in unsupported or getattr(error, "winerror", None) in (1, 50, 1314):
+                self.skipTest(f"Link creation is unavailable: {error}")
+            raise
 
     def test_model_mapping_and_default_output(self):
         result = self.run_generator()
@@ -123,17 +148,44 @@ class GenerateConfigTests(unittest.TestCase):
                 ]
             ],
         )
-        self.assertEqual(stat.S_IMODE(output_path.stat().st_mode), 0o600)
 
-    def test_custom_output_replaces_existing_file_with_private_permissions(self):
+    def test_custom_output_replaces_existing_file(self):
         output_path = self.directory / "custom.yaml"
         output_path.write_text("old configuration", encoding="utf-8")
-        output_path.chmod(0o644)
         result = self.run_generator("-o", output_path.name)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(json.loads(output_path.read_text(encoding="utf-8"))["model_list"]), 4)
-        self.assertEqual(stat.S_IMODE(output_path.stat().st_mode), 0o600)
         self.assertFalse((self.directory / "config.yaml").exists())
+
+    def test_output_cannot_be_the_input_path(self):
+        self.assert_input_preserved(self.input_path.name)
+
+    def test_output_cannot_be_an_absolute_alias_of_the_input(self):
+        self.assert_input_preserved(self.input_path.absolute())
+
+    def test_output_cannot_be_a_symbolic_link_to_the_input(self):
+        output_path = self.directory / "symbolic-link.yaml"
+        self.create_link(lambda: output_path.symlink_to(self.input_path))
+        self.assert_input_preserved(output_path)
+
+    def test_output_cannot_be_a_hard_link_to_the_input(self):
+        output_path = self.directory / "hard-link.yaml"
+        self.create_link(lambda: os.link(self.input_path, output_path))
+        self.assert_input_preserved(output_path)
+
+    def test_empty_endpoints_preserves_output(self):
+        self.write_input([])
+        self.assert_preserved_on_failure("At least one connection destination is required")
+        self.assertEqual(self.server.requests, [])
+
+    def test_empty_model_list_is_valid(self):
+        self.write_input([{"name": "east", "url": self.east_base, "api_key": EAST_KEY}])
+        self.server.replies[EAST_PATH] = (200, model_list())
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests, [(EAST_PATH, "Bearer " + EAST_KEY)])
+        output_path = self.directory / "config.yaml"
+        self.assertEqual(json.loads(output_path.read_text(encoding="utf-8")), {"model_list": []})
 
     def test_authentication_error_preserves_output(self):
         self.server.replies[WEST_PATH] = (401, {"error": WEST_KEY})

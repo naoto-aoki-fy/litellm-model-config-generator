@@ -2,7 +2,7 @@
 
 Generate a LiteLLM Proxy configuration from the models advertised by OpenAI-compatible APIs. The generator requires Python 3.9 or later and uses only the standard library.
 
-Save your endpoints in `endpoints.json`. Give each endpoint a unique name and replace the example keys with your API keys.
+Save at least one endpoint in `endpoints.json`. Give each endpoint a unique name and replace the example keys with your API keys.
 
 ```json
 {
@@ -18,6 +18,6 @@ python3 generate_config.py endpoints.json
 litellm --config config.yaml
 ```
 
-Use `-o PATH` to write to a different location. The generator adds `/v1` where needed and prefixes shared model IDs with the endpoint name, for example `east/shared-model`. The generated file contains the API keys and is created with owner-only read and write permissions.
+Use `-o PATH` to write to a different location. Choose a destination separate from the input file. The generator adds `/v1` where needed and prefixes shared model IDs with the endpoint name, for example `east/shared-model`. The generated file contains API keys.
 
 The second command requires the LiteLLM Proxy CLI. See the [official LiteLLM setup and configuration examples](https://docs.litellm.ai/docs/).

@@ -60,6 +60,8 @@ def read_endpoints(path):
 
     if not isinstance(document, dict) or not isinstance(document.get("endpoints"), list):
         raise GenerationError("The input must contain an endpoints array.")
+    if not document["endpoints"]:
+        raise GenerationError("At least one connection destination is required.")
 
     endpoints = []
     names = set()
@@ -83,6 +85,17 @@ def read_endpoints(path):
         endpoints.append(Endpoint(name, api_base, api_key))
         names.add(name)
     return endpoints
+
+
+def validate_output_path(input_path, output_path):
+    try:
+        same_file = output_path.samefile(input_path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise GenerationError("Could not compare the input and output files.") from None
+    if same_file:
+        raise GenerationError("The input and output refer to the same file.")
 
 
 def fetch_model_ids(opener, endpoint, position):
@@ -155,7 +168,6 @@ def write_config(path, config):
             mode="w", encoding="utf-8", dir=path.parent, delete=False
         ) as output:
             temporary_path = Path(output.name)
-            os.fchmod(output.fileno(), 0o600)
             output.write(contents + "\n")
         os.replace(temporary_path, path)
         temporary_path = None
@@ -173,7 +185,9 @@ def main():
     )
     args = parser.parse_args()
     try:
-        config = build_config(read_endpoints(args.input))
+        endpoints = read_endpoints(args.input)
+        validate_output_path(args.input, args.output)
+        config = build_config(endpoints)
     except GenerationError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
