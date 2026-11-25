@@ -105,7 +105,7 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertEqual(output_path.stat().st_ino, existing_inode)
         self.assertEqual(
             {path.name for path in self.directory.iterdir()},
-            {"config.yaml", "endpoints.json"},
+            {output_path.name, self.input_path.name},
         )
 
     def assert_input_preserved(self, output_path):
@@ -152,6 +152,55 @@ class GenerateConfigTests(unittest.TestCase):
                 ]
             ],
         )
+
+    def test_input_formats_generate_identical_configurations(self):
+        result = self.run_generator()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_path = self.directory / "config.yaml"
+        expected = output_path.read_bytes()
+        json_input = self.input_path.read_text(encoding="utf-8")
+        yaml_input = yaml.safe_dump(json.loads(json_input))
+
+        for filename, contents in (
+            ("endpoints.yaml", yaml_input),
+            ("endpoints.yml", yaml_input),
+            ("endpoints.YAML", yaml_input),
+            ("endpoints.YmL", yaml_input),
+            ("endpoints", json_input),
+            ("endpoints.txt", json_input),
+        ):
+            with self.subTest(filename=filename):
+                output_path.unlink(missing_ok=True)
+                self.input_path = self.directory / filename
+                self.input_path.write_text(contents, encoding="utf-8")
+                result = self.run_generator()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output_path.read_bytes(), expected)
+
+    def test_yaml_syntax_error_preserves_output_and_hides_input(self):
+        self.input_path.unlink()
+        self.input_path = self.directory / "endpoints.yaml"
+        self.input_path.write_text(
+            f'endpoints:\n  - {{api_key: "{EAST_KEY}", name: ]}}\n',
+            encoding="utf-8",
+        )
+        self.assert_preserved_on_failure("Could not read the endpoints YAML file.")
+        self.assertEqual(self.server.requests, [])
+
+    def test_yaml_required_field_type_mismatches_preserve_output_and_hide_keys(self):
+        self.input_path.unlink()
+        self.input_path = self.directory / "endpoints.yml"
+        for field, value in (("name", True), ("url", None), ("api_key", [EAST_KEY])):
+            with self.subTest(field=field):
+                endpoint = {"name": "east", "url": self.east_base, "api_key": EAST_KEY}
+                endpoint[field] = value
+                self.input_path.write_text(
+                    yaml.safe_dump({"endpoints": [endpoint]}), encoding="utf-8"
+                )
+                self.assert_preserved_on_failure(
+                    "Endpoint 1 must have string name, url, and api_key fields."
+                )
+                self.assertEqual(self.server.requests, [])
 
     def test_custom_output_replaces_existing_file(self):
         output_path = self.directory / "custom.yaml"

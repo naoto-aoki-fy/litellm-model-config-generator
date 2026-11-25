@@ -54,11 +54,16 @@ def normalize_url(url):
 
 
 def read_endpoints(path):
+    is_yaml = path.suffix.lower() in (".yaml", ".yml")
     try:
         with path.open(encoding="utf-8") as source:
-            document = json.load(source, parse_constant=reject_json_constant)
-    except (OSError, ValueError, RecursionError):
-        raise GenerationError("Could not read the endpoints JSON file.") from None
+            if is_yaml:
+                document = yaml.safe_load(source)
+            else:
+                document = json.load(source, parse_constant=reject_json_constant)
+    except (OSError, ValueError, RecursionError, yaml.YAMLError):
+        input_format = "YAML" if is_yaml else "JSON"
+        raise GenerationError(f"Could not read the endpoints {input_format} file.") from None
 
     if not isinstance(document, dict) or not isinstance(document.get("endpoints"), list):
         raise GenerationError("The input must contain an endpoints array.")
@@ -204,7 +209,14 @@ def write_config(path, config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="endpoint definitions in JSON")
+    parser.add_argument(
+        "input",
+        type=Path,
+        help=(
+            "endpoint definitions in YAML (.yaml or .yml, case-insensitive) "
+            "or JSON (all other filenames)"
+        ),
+    )
     parser.add_argument(
         "-o", "--output", type=Path, default=Path("config.yaml"),
         help="configuration destination (default: config.yaml)",
